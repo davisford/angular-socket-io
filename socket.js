@@ -57,7 +57,14 @@ angular.module('btford.socket-io', []).
               callback = asyncAngularify(socket, callback);
               arguments[lastIndex] = callback;
             }
-            return socket.emit.apply(socket, arguments);
+            // delay emit if socket is not connected yet
+            if (!socket.connected) {
+              socket.on('connect', function () {
+                return socket.emit.apply(socket, arguments);
+              });
+            } else {
+              return socket.emit.apply(socket, arguments);
+            }
           },
 
           removeListener: function (ev, fn) {
@@ -97,7 +104,14 @@ angular.module('btford.socket-io', []).
               scope.$on('$destroy', function () {
                 socket.removeListener(eventName, forwardBroadcast);
               });
-              socket.on(eventName, forwardBroadcast);
+              // delay forward if socket is not connected yet
+              if (!socket.connected) {
+                socket.on('connect', function () {
+                  socket.on(eventName, forwardBroadcast);
+                });
+              } else {
+                socket.on(eventName, forwardBroadcast);
+              }
             });
           }
         };
