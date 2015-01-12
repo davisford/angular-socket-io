@@ -11,112 +11,158 @@ angular.module('btford.socket-io', []).
     'use strict';
 
     // when forwarding events, prefix the event name
-    var defaultPrefix = 'socket:',
-      ioSocket;
+    var defaultPrefix = 'socket:';
 
     // expose to provider
     this.$get = ['$rootScope', '$timeout', function ($rootScope, $timeout) {
 
-      var asyncAngularify = function (socket, callback) {
-        return callback ? function () {
-          var args = arguments;
-          $timeout(function () {
-            callback.apply(socket, args);
-          }, 0);
-        } : angular.noop;
-      };
-
-      return function socketFactory (options) {
+      return function socketFactory(options) {
         options = options || {};
-        var socket = options.ioSocket || io.connect();
         var prefix = options.prefix === undefined ? defaultPrefix : options.prefix ;
         var defaultScope = options.scope || $rootScope;
 
-        var addListener = function (eventName, callback) {
-          socket.on(eventName, callback.__ng = asyncAngularify(socket, callback));
+        var socket;
+
+        // if socket is not connected, we queue up calls from controllers
+        // and re-execute later
+        var queue = {
+          addListener: [],
+          addOnceListener: [],
+          forward: [],
+          emit: []
         };
 
-        var addOnceListener = function (eventName, callback) {
-          socket.once(eventName, callback.__ng = asyncAngularify(socket, callback));
-        };
+        function asyncAngularify(socket, callback) {
+          return callback ? function () {
+            var args = arguments;
+            $timeout(function () {
+              callback.apply(socket, args);
+            }, 0);
+          } : angular.noop;
+        }
 
-        var wrappedSocket = {
-          on: addListener,
-          addListener: addListener,
-          once: addOnceListener,
-
-          socket: function (s) {
-            if (s) { socket = s; }
-            return socket;
-          },
-
-          emit: function (eventName, data, callback) {
-            var lastIndex = arguments.length - 1;
-            var callback = arguments[lastIndex];
-            if(typeof callback == 'function') {
+        // this is a wrapper around base functionality we do the the socket.io client but we always require
+        // the caller to pass the instance into us.  the onus is on the caller to ensure that the socket
+        // client is in a good state / connected.
+        var io = {
+          emit: function (socket, eventName, data, callback) {
+            if (!socket || !socket.connected) { throw new Error('emit called and socket not ready'); }
+            if (typeof callback === 'function') {
               callback = asyncAngularify(socket, callback);
-              arguments[lastIndex] = callback;
             }
-            // delay emit if socket is not connected yet
-            if (!socket.connected) {
-              socket.on('connect', function () {
-                return socket.emit.apply(socket, arguments);
-              });
-            } else {
-              return socket.emit.apply(socket, arguments);
-            }
+            return socket.emit.call(socket, eventName, data, callback);
           },
 
-          removeListener: function (ev, fn) {
-            if (fn && fn.__ng) {
-              arguments[1] = fn.__ng;
-            }
-            return socket.removeListener.apply(socket, arguments);
-          },
-
-          removeAllListeners: function() {
-            return socket.removeAllListeners.apply(socket, arguments);
-          },
-
-          disconnect: function (close) {
-            return socket.disconnect(close);
-          },
-
-          connect: function() {
-            return socket.connect();
-          },
-
-          // when socket.on('someEvent', fn (data) { ... }),
-          // call scope.$broadcast('someEvent', data)
-          forward: function (events, scope) {
-            if (events instanceof Array === false) {
-              events = [events];
-            }
-            if (!scope) {
-              scope = defaultScope;
-            }
+          forward: function (socket, events, scope, prefix) {
+            if (!socket || !socket.connected) { throw new Error('forward called and socket not ready'); }
             events.forEach(function (eventName) {
               var prefixedEvent = prefix + eventName;
               var forwardBroadcast = asyncAngularify(socket, function () {
                 Array.prototype.unshift.call(arguments, prefixedEvent);
                 scope.$broadcast.apply(scope, arguments);
               });
+
               scope.$on('$destroy', function () {
                 socket.removeListener(eventName, forwardBroadcast);
               });
-              // delay forward if socket is not connected yet
-              if (!socket.connected) {
-                socket.on('connect', function () {
-                  socket.on(eventName, forwardBroadcast);
-                });
-              } else {
-                socket.on(eventName, forwardBroadcast);
-              }
+
+              return socket.on(eventName, forwardBroadcast);
             });
+          },
+
+          addListener: function (socket, eventName, callback) {
+            if (!socket || !socket.connected) { throw new Error('addListener called and socket not ready'); }
+            return socket.on(eventName, callback.__ng = asyncAngularify(socket, callback));
+          },
+
+          addOnceListener: function (socket, eventName, callback) {
+            if (!socket || !socket.connected) { throw new Error('addOnceListener called and socket not ready'); }
+            return socket.once(eventName, callback.__ng = asyncAngularify(socket, callback));
           }
         };
 
-        return wrappedSocket;
-      };
-    }];
-  });
+        /*jshint unused: false */
+        var emit = function (eventName, data, callback) {
+          var array = Array.prototype.slice.apply(arguments);
+          if (!socket || !socket.connected) {
+            queue.emit.push(array);
+          } else {
+            array.unshift(socket);
+            io.emit.apply(null, array);
+          }
+        };
+
+        /*jshint unused: false */
+        var forward = function (events, scope) {
+          if (!scope) { scope = defaultScope; }
+          if (events instanceof Array === false) { events = [events]; }
+          var array = [events, scope, prefix];
+          if (!socket || !socket.connected) {
+            queue.forward.push(array);
+          } else {
+            array.unshift(socket);
+            io.forward.apply(null, array);
+          }
+        };
+
+        /*jshint unused: false */
+        var addListener = function (eventName, callback) {
+          var array = Array.prototype.slice.call(arguments);
+          if (!socket || !socket.connected) {
+            queue.addListener.push(array);
+          } else {
+            array.unshift(socket);
+            io.addListener.apply(null, array);
+          }
+        };
+
+        // /*jshint unused: false */
+        var addOnceListener = function (eventName, callback) {
+          var array = Array.prototype.slice.call(arguments);
+          if (!socket || !socket.connected) {
+            queue.addOnceListener.push(array);
+          } else {
+            array.unshift(socket);
+            io.addOnceListener.apply(null, array);
+          }
+        };
+
+        var removeListener = function (ev, fn) {
+          if (fn && fn.__ng) {
+            arguments[1] = fn.__ng;
+          }
+          return socket.removeListener.apply(socket, arguments);
+        };
+
+        var removeAllListeners = function () {
+          return socket.removeAllListeners.apply(socket, arguments);
+        };
+
+        return {
+          emit: emit,
+          forward: forward,
+          on: addListener,
+          addListener: addListener,
+          once: addOnceListener,
+          removeListener: removeListener,
+          removeAllListeners: removeAllListeners,
+          socket: function (s) {
+            socket = s;
+            for (var key in queue) {
+              var deferredCalls = queue[key];
+              if (deferredCalls.length > 0) {
+                console.log('%s has %d deferred calls b/c socket was not ready yet', key, deferredCalls.length);
+                deferredCalls.map(function (array) {
+                  array.unshift(socket);
+                  io[key].apply(null, array);
+                });
+                queue[key].length = 0;
+              }
+            }
+          }
+        }; // end return
+
+      }; // end socketFactory
+
+    }];  // end .$get
+  }); // end provider
